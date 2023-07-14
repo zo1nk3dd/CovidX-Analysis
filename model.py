@@ -1,133 +1,151 @@
-from typing import Any
+from typing import Any, Optional
+from pytorch_lightning.utilities.types import STEP_OUTPUT
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torcheval.metrics import MulticlassAccuracy
+from torcheval.metrics.functional import multiclass_accuracy
 import pytorch_lightning as pl
+import wandb
+
+from data import CLASS_LABELS
 
 
-class VAE(pl.LightningModule):
-    def __init__(self):
+class VAE_Classifier(pl.LightningModule):
+    def __init__(self, latent_dim, y_dim=3, d_dim=-1):
         super().__init__()
-        self.model = VAE(100, 50, 50, 50, 10)
-        self.loss = nn.CrossEntropyLoss()
-        self.metric = MulticlassAccuracy()
-        self.beta = 1
-        self.gamma = 1
+        self.metric = multiclass_accuracy
+        self.beta = 0.1
+        self.alpha_y = 1
+
+        self.latent_dim = latent_dim
+        self.y_dim = y_dim  
+        self.d_dim = d_dim
+
+        self.model = VAE(latent_dim, y_dim, d_dim)
 
     def training_step(self, batch, batch_idx):
-        preds, loss, acc = self._get_preds_loss_accuracy(batch)
-        overall_loss, recon_loss, kl_div, class_loss = loss
+        x, y = batch
+        recons, yhat, z_q, qz = self.model(x)
+
+        recon_loss, kl_div = self.reconstruction_information(x, recons, z_q, qz)
+        class_loss, class_acc = self.classification_information(y, yhat)
+        loss = recon_loss - self.beta * kl_div + self.alpha_y * class_loss
 
         # Log loss and metric
+        self.log('train_loss', loss)
         self.log('train_recon_loss', recon_loss)
         self.log('train_kl_div', kl_div)
         self.log('train_class_loss', class_loss)
-        return overall_loss
+
+        return loss
     
     def validation_step(self, batch, batch_idx):
-        preds, loss, acc = self._get_preds_loss_accuracy(batch)
+        x, y = batch
+        recons, yhat, z_q, qz = self.model(x)
 
+        recon_loss, kl_div = self.reconstruction_information(x, recons, z_q, qz)
+        class_loss, class_acc = self.classification_information(y, yhat)
+
+        loss = recon_loss - self.beta * kl_div + self.alpha_y * class_loss
         # Log loss and metric
-        self.log('val_loss', loss[0])
-        self.log('val_accuracy', acc)
+        self.log('val_loss', loss)
+        # self.log({'val': {f"{label}_acc": class_acc[i] for i, label in enumerate(CLASS_LABELS)}})
         
-        return preds
+        if batch_idx == 0:
+            recon = wandb.Image(recons[0], caption="Reconstruction")
+            image = wandb.Image(x[0], caption="Original")
+            self.logger.experiment.log({"visualisations": {"reconstruction": recon, "original": image}})
+
+        return recons
+    
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+        recons, yhat, z_q, qz = self.model(x)
+
+        if batch_idx == 0:
+            self._y = [y]
+            self._yhat = [yhat]
+        else:
+            self._y.append(y)
+            self._yhat.append(yhat)
+
+    def on_test_end(self):
+        gt = torch.cat(self._y).cpu().numpy()
+        preds = torch.cat(self._yhat).cpu().numpy()
+
+        cm = wandb.plot.confusion_matrix(
+            probs=preds,
+            y_true=gt,
+            class_names=CLASS_LABELS
+        )
+
+        self._y = None
+        self._yhat = None
+
+        self.logger.experiment.log({'confidence_matrix': cm})
     
     def configure_optimizers(self) -> Any:
         optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
         return optimizer
     
-    def _get_preds_loss_accuracy(self, batch):
-        '''convenience function since train/valid/test steps are similar'''
-        x, y = batch
-        recons, yhat, qz, pz, z_q = self.model(x)
-
+    def reconstruction_information(self, inputs, reconstructions, z_q, qz):
         # Reconstruction loss
-        recon_loss = self.model.reconstruction_loss(x, recons)
+        recon_loss = F.mse_loss(inputs, reconstructions)
 
-        # KL divergence
-        kl_div = self.model.kl_divergence(pz, qz, z_q)
+        z_p_loc, z_p_scale = torch.zeros(z_q.size()[0], self.latent_dim).cuda(), torch.ones(z_q.size()[0], self.latent_dim).cuda()
+        pz = torch.distributions.Normal(z_p_loc, z_p_scale)
 
-        # Classification loss
-        class_loss = self.model.classification_loss(y, yhat)
+        kl_div = torch.sum(pz.log_prob(z_q) - qz.log_prob(z_q))
 
-        loss = recon_loss - self.beta * kl_div + self.gamma * class_loss
-
-        return yhat, (loss, recon_loss, kl_div, class_loss), self.metric(yhat, y)
-
-        
-
-
-
-class BasicModel(nn.Module):
-    def __init__(self, input_size: int = 299 * 299) -> None:
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Conv2d(1, 16, 11, stride=4),
-            nn.ReLU(),
-            nn.MaxPool2d(3, stride=2),
-            nn.Conv2d(16, 16, 5, padding=2),
-            nn.ReLU(),
-            nn.MaxPool2d(4, stride=2),
-            nn.Conv2d(16, 32, 3),
-            nn.ReLU(),
-            nn.MaxPool2d(2, stride=2),
-            nn.Conv2d(32, 32, 3, stride=2),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(3*3*32, 100),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(100, 3)
-        )
-
-    def forward(self, x):
-        return self.model(x)
+        return recon_loss, kl_div
     
+    def classification_information(self, y, yhat):
+        class_loss = F.cross_entropy(yhat, y)
+        class_acc = []
+        # for i in range(self.y_dim):
+        #     preds = yhat[y==i]
+        #     targets = y[y==i]
+        #     acc = torch.sum(preds == targets) / len(targets)
+        #     class_acc.append(acc)
+        return class_loss, class_acc
     
 
 class VAE(nn.Module):
-    def __init__(self, z_dim, x_dim, y_dim, d_dim, beta) -> None:
+    def __init__(self, latent_dim, y_dim, d_dim):
         super().__init__()
-        self.z_dim = z_dim
-        self.x_dim = x_dim
+        self.metric = multiclass_accuracy
+        self.beta = 0.1
+        self.alpha_y = 1
+
+        self.z_dim = latent_dim
         self.y_dim = y_dim
         self.d_dim = d_dim
-        self.beta = beta
 
-        self.encoder = Encoder(z_dim)
-        self.decoder = Decoder(z_dim)  
-        self.classifier = MLPClassifier(z_dim, y_dim)
+        self.encoder = Encoder(self.z_dim)
+        self.decoder = Decoder(self.z_dim)  
+        self.classifier = MLPClassifier(self.z_dim, self.y_dim) 
 
-    def reconstruction_loss(self, x, recons):
-        return F.mse_loss(recons, x)
-
-    def kl_divergence(self, pz, qz, z_q):
-        return torch.sum(pz.log_prob(z_q) - qz.log_prob(z_q))    
+    def encode(self, x):
+        mu, log_var = self.encoder(x)
+        return mu, log_var
     
-    def classification_loss(self, y, y_hat):
-        return F.cross_entropy(y_hat, y)
-
+    def decode(self, z):
+        return self.decoder(z)
+    
+    def reparametrize(self, mu, log_var):
+        std = torch.exp(0.5 * log_var)
+        qz = torch.distributions.Normal(mu, std)
+        return qz
 
     def forward(self, x):
-        mu, log_var = self.encoder(x)
-
-        std = torch.exp(0.5 * log_var)
-
-        qz = torch.distributions.Normal(mu, std)
+        mu, log_var = self.encode(x)
+        qz = self.reparametrize(mu, log_var) # Distribution of z given the encoder
         z_q = qz.rsample()
 
-        z_p_loc, z_p_scale = torch.zeros(z_q.size()[0], self.z_dim).cuda(), torch.ones(z_q.size()[0], self.z_dim).cuda()
+        reconstruction = self.decode(z_q)
+        y_predicted = self.classifier(z_q)
 
-        # Reparameterization trick
-        pz = torch.distributions.Normal(z_p_loc, z_p_scale)
-
-        recons = self.decoder(z_q)
-
-        yhat = self.classifier(z_q)
-
-        return recons, yhat, qz, pz, z_q
+        return reconstruction, y_predicted, z_q, qz
 
 
 # A classifier that takes a latent vector and reduces it to a single class
@@ -210,4 +228,3 @@ class Decoder(nn.Module):
         z = self.d4(z)
         z = self.d5(z)
         return z
-

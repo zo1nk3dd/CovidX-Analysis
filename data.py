@@ -49,7 +49,7 @@ class CovidXDataModule(pl.LightningDataModule):
 
     def setup(self, stage: str):
         data = CovidXDataset()
-        self.train, self.val, self.test = random_split(data, [0.5, 0.25, 0.25])
+        self.train, self.val, self.test = random_split(data, [0.6, 0.2, 0.2])
 
     def train_dataloader(self):
         return DataLoader(self.train, batch_size=self.batch_size)
