@@ -11,17 +11,19 @@ from data import CLASS_LABELS
 
 
 class VAE_Classifier(pl.LightningModule):
-    def __init__(self, latent_dim, y_dim=3, d_dim=-1):
+    def __init__(self, latent_dim, beta, alpha_y, y_dim=3, d_dim=-1):
         super().__init__()
         self.metric = multiclass_accuracy
-        self.beta = 0.1
-        self.alpha_y = 1
+        self.beta = beta
+        self.alpha_y = alpha_y
 
         self.latent_dim = latent_dim
         self.y_dim = y_dim  
         self.d_dim = d_dim
 
         self.model = VAE(latent_dim, y_dim, d_dim)
+
+        self.save_hyperparameters()
 
     def training_step(self, batch, batch_idx):
         x, y = batch

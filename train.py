@@ -1,21 +1,30 @@
-import wandb
 import pytorch_lightning as pl
 
 from model import VAE_Classifier
 from data import CovidXDataModule
 
 from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, Callback
 
-model = VAE_Classifier(100)
+import argparse
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument('--beta', type=float, default=1, help='kl-divergence weighting')
+parser.add_argument('--alpha_y', type=float, default=1, help='weighting for class predictions')
+parser.add_argument('--epochs', type=int, default=100, help='number of epochs')
+parser.add_argument('--latent_dim', type=int, default=100, help='latent dimension')
+
+args = parser.parse_args()
+
+model = VAE_Classifier(latent_dim=args.latent_dim, beta=args.beta, alpha_y=args.alpha_y)
 
 dm = CovidXDataModule()
 
-logger = WandbLogger(project='CovidX', name='VAE/test_new_logs', log_model='all')
+logger = WandbLogger(project='CovidX', name='VAE/tune_hparams', log_model='all')
 
 # checkpoint_callback = ModelCheckpoint(monitor='val.loss', mode='min')
 
-trainer = pl.Trainer(max_epochs=10, accelerator="gpu", devices=1, logger=logger, callbacks=[])
+trainer = pl.Trainer(max_epochs=args.epochs, accelerator="gpu", devices=1, logger=logger, callbacks=[])
 
 trainer.fit(model, datamodule=dm)
 trainer.test(model, datamodule=dm)
