@@ -13,12 +13,13 @@ parser.add_argument('--beta', type=float, default=1, help='kl-divergence weighti
 parser.add_argument('--alpha_y', type=float, default=1, help='weighting for class predictions')
 parser.add_argument('--epochs', type=int, default=100, help='number of epochs')
 parser.add_argument('--latent_dim', type=int, default=100, help='latent dimension')
+parser.add_argument('--img_dir', type=str, default='D:\Datasets\COVIDX\Data', help='path to image directory')
 
 args = parser.parse_args()
 
 model = VAE_Classifier(latent_dim=args.latent_dim, beta=args.beta, alpha_y=args.alpha_y)
 
-dm = CovidXDataModule()
+dm = CovidXDataModule(img_dir=args.img_dir)
 
 logger = WandbLogger(project='CovidX', name='VAE/tune_hparams', log_model='all')
 

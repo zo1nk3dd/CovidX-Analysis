@@ -7,6 +7,7 @@ parser.add_argument('--beta', type=float, default=1, help='kl-divergence weighti
 parser.add_argument('--alpha_y', type=float, default=1, help='weighting for class predictions')
 parser.add_argument('--epochs', type=int, default=100, help='number of epochs')
 parser.add_argument('--latent_dim', type=int, default=100, help='latent dimension')
+parser.add_argument('--img_dir', type=str, default='D:\Datasets\COVIDX\Data', help='path to image directory')
 
 args = parser.parse_args()
 
@@ -16,7 +17,7 @@ cmds = [
     '#SBATCH --gres=gpu:1',
     '#SBATCH --job-name=covidx_model',
     'conda activate torch2',
-    f'python ./train.py --beta={args.beta} --alpha_y={args.alpha_y} --epochs={args.epochs} --latent_dim={args.latent_dim}'
+    f'python ./train.py --beta={args.beta} --alpha_y={args.alpha_y} --epochs={args.epochs} --latent_dim={args.latent_dim} --img_dir={args.img_dir}'
 ]
 
 with open('job.sh', 'w') as f:
