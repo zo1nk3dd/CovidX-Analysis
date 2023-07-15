@@ -11,8 +11,8 @@ CLASS_LABELS = ['COVID', 'Normal', 'Viral Pneumonia']
 CLASS_SIZES = [3616, 10192, 1345]
 
 class CovidXDataset(Dataset):
-    def __init__(self):
-        self.img_dir = 'D:\Datasets\COVIDX\Data'
+    def __init__(self, img_dir):
+        self.img_dir = img_dir
         self.class_metadata = {class_idx: pd.read_excel(f'{self.img_dir}\{label}.metadata.xlsx') for class_idx, label in enumerate(CLASS_LABELS)}
         self.transform = transforms.ConvertImageDtype(torch.float32)
 
