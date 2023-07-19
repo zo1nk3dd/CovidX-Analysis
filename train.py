@@ -23,7 +23,7 @@ args = parser.parse_args()
 
 model = VAE_Classifier(latent_dim=args.latent_dim, beta=args.beta, alpha_y=args.alpha_y)
 
-dm = CovidXDataModule(img_dir=args.img_dir)
+dm = CovidXDataModule(args.img_dir)
 
 wandb.login(key='99ecdbb4fcebc379c7df8b8f11b69c805e9f3f5d')
 logger = WandbLogger(project='CovidX', name='VAE/tune_hparams', log_model='all')
