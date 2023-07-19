@@ -1,5 +1,4 @@
 from typing import Any, Optional
-from pytorch_lightning.utilities.types import STEP_OUTPUT
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -219,7 +218,8 @@ class Decoder(nn.Module):
         self.d2 = DeConvBlock(64, 64, 2, 2, 0)
         self.d3 = DeConvBlock(64, 32, 3, 2, 0)
         self.d4 = DeConvBlock(32, 16, 3, 2, 0)
-        self.d5 = DeConvBlock(16, 1, 5, 3, 0)
+        self.d5 = DeConvBlock(16, 16, 5, 3, 0)
+        self.sharpen = ImageSharpen()
         
     def forward(self, z):
         z = self.fc(z)
@@ -229,4 +229,17 @@ class Decoder(nn.Module):
         z = self.d3(z)
         z = self.d4(z)
         z = self.d5(z)
+        z = self.sharpen(z)
+        return z
+
+class ImageSharpen(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.d1 = DeConvBlock(16, 16, 3, 1, 1)
+        self.c1 = ConvBlock(16, 1, 3, 1, 1)
+
+    def forward(self, x):
+        z = self.d1(x)
+        z = self.c1(z)
         return z
