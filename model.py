@@ -122,8 +122,8 @@ class VAE(nn.Module):
         self.y_dim = y_dim
         self.d_dim = d_dim
 
-        self.encoder = Encoder(self.z_dim)
-        self.decoder = Decoder(self.z_dim)  
+        self.encoder = Encoder2(self.z_dim)
+        self.decoder = Decoder2(self.z_dim)  
         self.classifier = MLPClassifier(self.z_dim, self.y_dim) 
 
     def encode(self, x):
@@ -170,7 +170,7 @@ class ConvBlock(nn.Module):
 
     def forward(self, x):
         return self.relu(self.bn(self.conv(x)))
-    
+
 
 class DeConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding) -> None:
@@ -181,6 +181,61 @@ class DeConvBlock(nn.Module):
 
     def forward(self, x):
         return self.relu(self.bn(self.conv(x)))
+
+    
+class ConvBlock2(nn.Module):
+    def __init__(self, in_channels, out_channels, first=False, last=False):
+        super().__init__()
+        if first:
+            self.c1 = nn.Conv2d(1, in_channels, 3, 1, 1)
+        else:
+            self.c1 = nn.Conv2d(in_channels, in_channels, 3, 1, 1)
+        self.c2 = nn.Conv2d(in_channels, out_channels, 3, 1, 1)
+        if not last:
+            self.bn = nn.BatchNorm2d(out_channels)
+            self.mp = nn.MaxPool2d(2, 2)
+        self.last=last
+
+    def forward(self, x):
+        x = F.relu(self.c1(x))
+        x = F.relu(self.c2(x))
+        if not self.last:
+            x = self.bn(x)
+            x = self.mp(x)
+        return x
+    
+
+class DeConvBlock2(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+
+        self.c1 = nn.Conv2d(in_channels, in_channels, 3, 1, 1)
+        self.c2 = nn.ConvTranspose2d(in_channels, out_channels, 3, 1, 1)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.mp = nn.Upsample(scale_factor=2)
+
+    def forward(self, x):
+        x = F.relu(self.c1(x))
+        x = F.relu(self.c2(x))
+        x = self.bn(x)
+        x = self.mp(x)
+        return x
+    
+
+class ImageSharpen(nn.Module):
+    def __init__(self, in_channels) -> None:
+        super().__init__()
+        self.upsample = nn.Upsample(size=(299, 299))
+        self.c1 = nn.Conv2d(in_channels, in_channels, 3, 1, 1)
+        self.d1 = DeConvBlock(in_channels, in_channels, 3, 1, 1)
+        self.c2 = ConvBlock(in_channels, 1, 3, 1, 1)
+
+    def forward(self, x):
+        x = self.upsample(x)
+        z = F.relu(self.c1(x))
+        z = F.relu(self.d1(z))  
+        z = F.sigmoid(self.c2(x))
+        return z
     
 
 # Encoder that maps a 299x299 grayscale image to a latent dimension
@@ -232,14 +287,45 @@ class Decoder(nn.Module):
         z = self.sharpen(z)
         return z
 
-class ImageSharpen(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
 
-        self.d1 = DeConvBlock(16, 16, 3, 1, 1)
-        self.c1 = ConvBlock(16, 1, 3, 1, 1)
+class Encoder2(nn.Module):
+    def __init__(self, latent_dim) -> None:
+        super().__init__()
+        self.c1 = ConvBlock2(32, 64, first=True)
+        self.c2 = ConvBlock2(64, 64)
+        self.c3 = ConvBlock2(64, 128)
+        self.c4 = ConvBlock2(128, 128)
+        self.c5 = ConvBlock2(128, 128, last=True)
+ 
+        self.mu = nn.Linear(18*18*128, latent_dim)
+        self.log_var = nn.Linear(18*18*128, latent_dim)
 
     def forward(self, x):
-        z = self.d1(x)
-        z = self.c1(z)
+        z = self.c1(x)
+        z = self.c2(z)
+        z = self.c3(z)
+        z = self.c4(z)
+        z = self.c5(z)
+        z = z.view(-1, 18*18*128)
+        mu = self.mu(z)
+        log_var = self.log_var(z)
+        return mu, log_var
+    
+class Decoder2(nn.Module):
+    def __init__(self, latent_dim) -> None:
+        super().__init__()
+        self.fc = nn.Linear(latent_dim, 18*18*128)
+        self.d1 = DeConvBlock2(128, 128)
+        self.d2 = DeConvBlock2(128, 64)
+        self.d3 = DeConvBlock2(64, 64)
+        self.d4 = DeConvBlock2(64, 32)
+        self.d5 = ImageSharpen(32)
+
+    def forward(self, x):
+        z = self.fc(x)
+        z = z.view(-1, 128, 18, 18)
+        z = self.d1(z)
+        z = self.d2(z)
+        z = self.d3(z)
+        z = self.d5(z)
         return z

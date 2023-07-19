@@ -11,19 +11,19 @@ import wandb
 TRAINING PARAMETERS
 '''
 img_dir = 'D:/Datasets/COVIDX/Data'
-epochs = 50
+epochs = 10
 
 latent_dimension = 100
 
-beta = 1
-alpha_y = 10000
+beta = 0
+alpha_y = 1
 
 model = VAE_Classifier(latent_dimension, beta, alpha_y)
 
-dm = CovidXDataModule(img_dir)
+dm = CovidXDataModule(img_dir, batch_size=16)
 
 wandb.login(key='99ecdbb4fcebc379c7df8b8f11b69c805e9f3f5d')
-logger = WandbLogger(project='CovidX-hparams', name=f'l_dim: {latent_dimension}, beta: {beta}, alpha_y: {alpha_y}', log_model='all')
+logger = WandbLogger(project='CovidX-pic_quality', name=f'model_loss_paper, beta: {beta}', log_model='all')
 
 trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices=1, logger=logger, callbacks=[])
 
