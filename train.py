@@ -1,16 +1,16 @@
 import pytorch_lightning as pl
 
-from model import VAE_Classifier
+from model_compressed import VAE_Classifier
 from data import CovidXDataModule
 
 from pytorch_lightning.loggers import WandbLogger
 import wandb
 
-
+pl.seed_everything(42, workers=True)
 '''
 TRAINING PARAMETERS
 '''
-img_dir = 'D:/Datasets/COVIDX/Data'
+img_dir = 'D:/Datasets/COVIDX/ResizedData'
 epochs = 10
 
 latent_dimension = 100
@@ -18,15 +18,18 @@ latent_dimension = 100
 beta = 0
 alpha_y = 1
 
-model = VAE_Classifier(latent_dimension, beta, alpha_y)
-
 dm = CovidXDataModule(img_dir, batch_size=16)
 
-wandb.login(key='99ecdbb4fcebc379c7df8b8f11b69c805e9f3f5d')
-logger = WandbLogger(project='CovidX-pic_quality', name=f'model_loss_paper, beta: {beta}', log_model='all')
+print(f'wandb login: {wandb.login(key="99ecdbb4fcebc379c7df8b8f11b69c805e9f3f5d")}')
 
-trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices=1, logger=logger, callbacks=[])
+for ld in [100, 1000, 10000]:
+    for mse in [1, 100, 10000]:
+        model = VAE_Classifier(ld, mse, alpha_y)
 
-trainer.fit(model, datamodule=dm)
+        logger = WandbLogger(project='CovidX-pic_quality', name='Autoencoder-resizeconv-mseloss-{mse}-latent-{ld}', log_model='all')
 
-trainer.test(model, datamodule=dm)
+        trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices=1, logger=logger, callbacks=[])
+
+        trainer.fit(model, datamodule=dm)
+
+        trainer.test(model, datamodule=dm)
