@@ -38,7 +38,7 @@ class CovidXDataset(Dataset):
         image = self.transform(image)
         # Domain information
         if self.domain_aware:   
-            domain = self.class_metadata[class_idx].iloc(image_idx, 3)
+            domain = self.class_metadata[class_idx].iloc[image_idx - 1, 3]
             domain_idx = DOMAIN_LABELS.index(domain)
             return image, (class_idx, domain_idx)
         else:

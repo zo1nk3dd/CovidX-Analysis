@@ -10,86 +10,103 @@ from data import CLASS_LABELS, DOMAIN_LABELS
 
 
 class DIVA(pl.LightningModule):
-    def __init__(self, latent_dim, beta, alpha_y, y_dim=3, d_dim=8):
+    def __init__(self, latent_dim, beta, alpha_y, alpha_d, y_dim=3, d_dim=8):
         super().__init__()
         self.metric = multiclass_accuracy
         self.beta = beta
         self.alpha_y = alpha_y
+        self.alpha_d = alpha_d
 
         self.latent_dim = latent_dim
         self.y_dim = y_dim  
         self.d_dim = d_dim
 
-        self.encoder = Encoder(self.latent_dim)
-        self.decoder = Decoder(self.latent_dim)
+        self.qzy = Encoder(self.latent_dim)
+        self.qzd = Encoder(self.latent_dim)
+        self.qzx = Encoder(self.latent_dim)
+
+        self.px = Decoder(3 * self.latent_dim)
 
         self.y_classifier = MLPClassifier(self.latent_dim, self.y_dim)
         self.d_classifier = MLPClassifier(self.latent_dim, self.d_dim)
 
         self.save_hyperparameters()
 
-    def training_step(self, batch, batch_idx):
-        x, (y, d) = batch
+    def forward(self, x, y, d):
+        y_mu, y_log_var = self.qzy(x)
+        d_mu, d_log_var = self.qzd(x)
+        x_mu, x_log_var = self.qzx(x)
         
-        z = self.encoder(x)
+        zy = self.reparametrize(y_mu, y_log_var)
+        zd = self.reparametrize(d_mu, d_log_var)
+        zx = self.reparametrize(x_mu, x_log_var)
 
-        r = self.decoder(z)    
+        y_z = zy.rsample()
+        d_z = zd.rsample()
+        x_z = zx.rsample()
 
-        yhat = self.y_classifier(z)
-        dhat = self.d_classifier(z)
+        r = self.px(torch.cat((y_z, d_z, x_z), dim=1))    
 
-        recon_loss, kl_div = self.reconstruction_information(x, r, None, None)
+        yhat = self.y_classifier(y_z)
+        dhat = self.d_classifier(d_z)
+
+        return r, yhat, dhat, zy, y_z, zd, d_z, zx, x_z
+    
+    def loss_values(self, batch):
+        x, l = batch
+        y, d = l
+
+        r, yhat, dhat, zy, y_z, zd, d_z, zx, x_z = self.forward(x, y, d)
+
+        recon_loss = F.mse_loss(x, r)
+
+        y_kl_div = self.kl_div(zy, y_z)
+        d_kl_div = self.kl_div(zd, d_z)
+        x_kl_div = self.kl_div(zx, x_z)
+
+        kl_div = y_kl_div + d_kl_div + x_kl_div
+
         class_loss, class_acc = self.classification_information(y, yhat)
         domain_loss, domain_acc = self.classification_information(d, dhat)
-        loss = recon_loss + self.alpha_y * class_loss # - self.beta * kl_div 
+
+        loss = recon_loss + self.alpha_y * class_loss + self.alpha_d * domain_loss - self.beta * kl_div
+
+        return r, loss, recon_loss, kl_div, class_loss, domain_loss
+
+    def training_step(self, batch, batch_idx):
+        recon, loss, recon_loss, kl_div, class_loss, domain_loss = self.loss_values(batch)
 
         # Log loss and metric
         self.log('train/loss', loss)
         self.log('train/recon_loss', recon_loss)
-        # self.log('train_kl_div', kl_div)
+        self.log('train/kl_div', kl_div)
         self.log('train/class_loss', class_loss)
         self.log('train/domain_loss', domain_loss)
 
         return loss
     
     def validation_step(self, batch, batch_idx):
-        x, (y, d) = batch
-        
-        z = self.encoder(x)
-
-        r = self.decoder(z)    
-
-        yhat = self.y_classifier(z)
-        dhat = self.d_classifier(z)
-
-        recon_loss, kl_div = self.reconstruction_information(x, r, None, None)
-        class_loss, class_acc = self.classification_information(y, yhat)
-        domain_loss, domain_acc = self.classification_information(d, dhat)
-        loss = recon_loss + self.alpha_y * class_loss # - self.beta * kl_div 
+        recon, loss, recon_loss, kl_div, class_loss, domain_loss = self.loss_values(batch)
 
         # Log loss and metric
         self.log('val/loss', loss)
         self.log('val/recon_loss', recon_loss)
-        # self.log('train_kl_div', kl_div)
+        self.log('train_kl_div', kl_div)
         self.log('val/class_loss', class_loss)
         self.log('val/domain_loss', domain_loss)
         
         if batch_idx == 0:
-            recon = wandb.Image(r[0], caption="Reconstruction")
-            image = wandb.Image(x[0], caption="Original")
+            recon = wandb.Image(recon[0], caption="Reconstruction")
+            image = wandb.Image(batch[0][0], caption="Original")
             self.logger.experiment.log({"visualisations": {"reconstruction": recon, "original": image}})
 
-        return r
+        return recon
     
     def test_step(self, batch, batch_idx):
-        x, (y, d) = batch
+        x, l = batch
+        y, d = l
         
-        z = self.encoder(x)
-
-        r = self.decoder(z)    
-
-        yhat = self.y_classifier(z)
-        dhat = self.d_classifier(z)
+        r, yhat, dhat, zy, y_z, zd, d_z, zx, x_z = self.forward(x, y, d)
 
         if batch_idx == 0:
             self._y = [y]
@@ -122,7 +139,7 @@ class DIVA(pl.LightningModule):
 
         cm = wandb.plot.confusion_matrix(
             probs=preds,
-            d_true=gt,
+            y_true=gt,
             class_names=DOMAIN_LABELS
         )
 
@@ -135,25 +152,18 @@ class DIVA(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
         return optimizer
     
-    def reconstruction_information(self, inputs, reconstructions, z_q, qz):
-        # Reconstruction loss
-        recon_loss = F.mse_loss(inputs, reconstructions)
+    def kl_div(self, qz, z_q):
+        z_p_loc, z_p_scale = torch.zeros(z_q.size()[0], self.latent_dim).cuda(), torch.ones(z_q.size()[0], self.latent_dim).cuda()
+        pz = torch.distributions.Normal(z_p_loc, z_p_scale)
+        # Todo the prior thingo
+        kl_div = torch.sum(pz.log_prob(z_q) - qz.log_prob(z_q))
 
-        # z_p_loc, z_p_scale = torch.zeros(z_q.size()[0], self.latent_dim).cuda(), torch.ones(z_q.size()[0], self.latent_dim).cuda()
-        # pz = torch.distributions.Normal(z_p_loc, z_p_scale)
-
-        # kl_div = torch.sum(pz.log_prob(z_q) - qz.log_prob(z_q))
-
-        return recon_loss, None # kl_div
+        return kl_div
     
     def classification_information(self, y, yhat):
         class_loss = F.cross_entropy(yhat, y)
         class_acc = []
-        # for i in range(self.y_dim):
-        #     preds = yhat[y==i]
-        #     targets = y[y==i]
-        #     acc = torch.sum(preds == targets) / len(targets)
-        #     class_acc.append(acc)
+
         return class_loss, class_acc
     
     def reparametrize(self, mu, log_var):
@@ -214,7 +224,7 @@ class Encoder(nn.Module):
         # n x 64 x 4 x 4
         
         self.mu = nn.Linear(4096, latent_dim)
-        # self.log_var = nn.Linear(12*12*64, latent_dim)
+        self.log_var = nn.Linear(4096, latent_dim)
         
     def forward(self, x):
         z = self.c1(x)
@@ -225,8 +235,8 @@ class Encoder(nn.Module):
 
         z = z.view(-1, 4096)
         mu = self.mu(z)
-        # log_var = self.log_var(z)
-        return mu, None #mu , log_var
+        log_var = self.log_var(z)
+        return mu , log_var
 
 
 # An encoder to reverse the process of the encoder
@@ -240,8 +250,6 @@ class Decoder(nn.Module):
         self.d4 = DeConvBlock(16, 1, 3, 1, 1)
         # self.d5 = DeConvBlock(16, 1, 3, 1, 1)
         
-        # self.fc = nn.Linear(latent_dim, 4*4*64)
-
     def forward(self, z):
         z = self.fc(z)
         z = z.view(-1, 64, 8, 8)
