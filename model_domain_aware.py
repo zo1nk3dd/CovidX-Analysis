@@ -147,7 +147,44 @@ class DIVA(pl.LightningModule):
         self._dhat = None
 
         self.logger.experiment.log({'domain_scores': cm})
-    
+
+
+    def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
+        if batch_idx == 0:
+            num_images = 5
+            x, l = batch
+            y, d = l
+
+            r, yhat, dhat, zy, y_z, zd, d_z, zx, x_z = self.forward(x, y, d)
+
+            # Class only
+            y_image = self.px(torch.cat((zy.mean, torch.zeros_like(d_z), torch.zeros_like(x_z)), dim=1))
+
+            # Domain only
+            d_image = self.px(torch.cat((torch.zeros_like(y_z), zd.mean, torch.zeros_like(x_z)), dim=1))
+
+            # Other only
+            x_image = self.px(torch.cat((torch.zeros_like(y_z), torch.zeros_like(d_z), zx.mean), dim=1))
+
+            for i in range(num_images):
+                image = wandb.Image(x[i], caption="Image")
+                recon = wandb.Image(r[i], caption="Reconstruction")
+                y_im = wandb.Image(y_image[i], caption="Class")
+                d_im = wandb.Image(d_image[i], caption="Domain")
+                x_im = wandb.Image(x_image[i], caption="Other")
+
+                self.logger.experiment.log({
+                    "Variation": [
+                        image, 
+                        recon,
+                        y_im,
+                        d_im,
+                        x_im
+                    ]
+                })
+                
+
+
     def configure_optimizers(self) -> Any:
         optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
         return optimizer

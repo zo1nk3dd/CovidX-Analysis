@@ -78,6 +78,9 @@ class CovidXDataModule(pl.LightningDataModule):
     def test_dataloader(self):
         return DataLoader(self.test, batch_size=self.batch_size)
 
+    def predict_dataloader(self):
+        return DataLoader(self.test, batch_size=self.batch_size)
+
         
 
 

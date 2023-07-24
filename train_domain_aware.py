@@ -11,7 +11,7 @@ pl.seed_everything(42, workers=True)
 TRAINING PARAMETERS
 '''
 img_dir = 'D:/Datasets/COVIDX/ResizedData'
-epochs = 10
+epochs = 5
 
 latent_dimension = 100
 
@@ -25,12 +25,16 @@ print(f'wandb login: {wandb.login(key="99ecdbb4fcebc379c7df8b8f11b69c805e9f3f5d"
 
 model = DIVA(latent_dimension, beta, alpha_y, alpha_d)
 
-logger = WandbLogger(project='CovidX-domain-aware', name=f'DIVA')
+logger = WandbLogger(project='CovidX-domain-aware', name=f'DIVA-test-predict-output')
 
 trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices=1, logger=logger, callbacks=[])
 
-trainer.fit(model, datamodule=dm)
+trainer.predict(model, datamodule=dm)
 
-trainer.test(model, datamodule=dm)
+# trainer.fit(model, datamodule=dm)
+
+# trainer.test(model, datamodule=dm)
+
+# trainer.predict(model, datamodule=dm)
 
 wandb.finish()
