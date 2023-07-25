@@ -10,25 +10,31 @@ from data import CLASS_LABELS, DOMAIN_LABELS
 
 
 class DIVA(pl.LightningModule):
-    def __init__(self, latent_dim, beta, alpha_y, alpha_d, y_dim=3, d_dim=8):
+    def __init__(self, zy_dim, zd_dim, zx_dim, beta, alpha_y, alpha_d, reconstruction_penalty, y_dim=3, d_dim=8):
         super().__init__()
         self.metric = multiclass_accuracy
-        self.beta = beta
+        self.beta = 0.1 # Beta scheduling used
         self.alpha_y = alpha_y
         self.alpha_d = alpha_d
+        self.recon_pen = reconstruction_penalty
 
-        self.latent_dim = latent_dim
+        self.zy_dim = zy_dim
+        self.zd_dim = zd_dim
+        self.zx_dim = zx_dim
         self.y_dim = y_dim  
         self.d_dim = d_dim
 
-        self.qzy = Encoder(self.latent_dim)
-        self.qzd = Encoder(self.latent_dim)
-        self.qzx = Encoder(self.latent_dim)
+        self.qzy = Encoder(zy_dim)
+        self.qzd = Encoder(zd_dim)
+        self.qzx = Encoder(zx_dim)
 
-        self.px = Decoder(3 * self.latent_dim)
+        self.px = Decoder(zy_dim + zd_dim + zx_dim)
 
-        self.y_classifier = MLPClassifier(self.latent_dim, self.y_dim)
-        self.d_classifier = MLPClassifier(self.latent_dim, self.d_dim)
+        self.prior_y = Prior(self.y_dim, self.zy_dim)
+        self.prior_d = Prior(self.d_dim, self.zd_dim)
+
+        self.y_classifier = MLPClassifier(self.zy_dim, self.y_dim)
+        self.d_classifier = MLPClassifier(self.zd_dim, self.d_dim)
 
         self.save_hyperparameters()
 
@@ -60,21 +66,21 @@ class DIVA(pl.LightningModule):
 
         recon_loss = F.mse_loss(x, r)
 
-        y_kl_div = self.kl_div(zy, y_z)
-        d_kl_div = self.kl_div(zd, d_z)
-        x_kl_div = self.kl_div(zx, x_z)
+        y_kl_div = self.kl_div(zy, y_z, y, type='y')
+        d_kl_div = self.kl_div(zd, d_z, d, type='d')
+        x_kl_div = self.kl_div(zx, x_z, None)
 
         kl_div = y_kl_div + d_kl_div + x_kl_div
 
         class_loss, class_acc = self.classification_information(y, yhat)
         domain_loss, domain_acc = self.classification_information(d, dhat)
 
-        loss = recon_loss + self.alpha_y * class_loss + self.alpha_d * domain_loss - self.beta * kl_div
+        loss = self.recon_pen * recon_loss + self.alpha_y * class_loss + self.alpha_d * domain_loss - self.beta * kl_div
 
-        return r, loss, recon_loss, kl_div, class_loss, domain_loss
+        return r, loss, recon_loss, kl_div, class_loss, domain_loss, class_acc, domain_acc
 
     def training_step(self, batch, batch_idx):
-        recon, loss, recon_loss, kl_div, class_loss, domain_loss = self.loss_values(batch)
+        recon, loss, recon_loss, kl_div, class_loss, domain_loss, class_acc, domain_acc = self.loss_values(batch)
 
         # Log loss and metric
         self.log('train/loss', loss)
@@ -82,18 +88,22 @@ class DIVA(pl.LightningModule):
         self.log('train/kl_div', kl_div)
         self.log('train/class_loss', class_loss)
         self.log('train/domain_loss', domain_loss)
+        # self.log('train/acc', class_acc)
+        # self.log('train/domain_acc', domain_acc)
 
         return loss
     
     def validation_step(self, batch, batch_idx):
-        recon, loss, recon_loss, kl_div, class_loss, domain_loss = self.loss_values(batch)
+        recon, loss, recon_loss, kl_div, class_loss, domain_loss, class_acc, domain_acc = self.loss_values(batch)
 
         # Log loss and metric
         self.log('val/loss', loss)
         self.log('val/recon_loss', recon_loss)
-        self.log('train_kl_div', kl_div)
+        self.log('val/kl_div', kl_div)
         self.log('val/class_loss', class_loss)
         self.log('val/domain_loss', domain_loss)
+        # self.log('val/class_acc', class_acc)
+        # self.log('val/domain_acc', domain_acc)
         
         if batch_idx == 0:
             recon = wandb.Image(recon[0], caption="Reconstruction")
@@ -151,48 +161,56 @@ class DIVA(pl.LightningModule):
 
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
         if batch_idx == 0:
-            num_images = 5
+            num_images = 16
             x, l = batch
             y, d = l
 
+            batch_size = x.shape[0]
+
+            table = wandb.Table(columns=['Original'] + CLASS_LABELS)
+
             r, yhat, dhat, zy, y_z, zd, d_z, zx, x_z = self.forward(x, y, d)
 
+            mu, log_var = self.prior_y(torch.tensor([i for i in range(self.y_dim)]).cuda())
+            print(mu.shape)
+
+            mu = torch.stack(batch_size * [mu])
+            print(mu.shape)
+
+            mu = mu.permute(1, 0, 2)
+            print(mu.shape)
+
+            latents = (torch.cat((mu[i], d_z, x_z), dim=1) for i in range(self.y_dim))
+
             # Class only
-            y_image = self.px(torch.cat((zy.mean, torch.zeros_like(d_z), torch.zeros_like(x_z)), dim=1))
-
-            # Domain only
-            d_image = self.px(torch.cat((torch.zeros_like(y_z), zd.mean, torch.zeros_like(x_z)), dim=1))
-
-            # Other only
-            x_image = self.px(torch.cat((torch.zeros_like(y_z), torch.zeros_like(d_z), zx.mean), dim=1))
+            images = [self.px(latent) for latent in latents]
 
             for i in range(num_images):
-                image = wandb.Image(x[i], caption="Image")
-                recon = wandb.Image(r[i], caption="Reconstruction")
-                y_im = wandb.Image(y_image[i], caption="Class")
-                d_im = wandb.Image(d_image[i], caption="Domain")
-                x_im = wandb.Image(x_image[i], caption="Other")
+                table.add_data(
+                    wandb.Image(x[i], caption=f"{CLASS_LABELS[y[i].data]}"),
+                    wandb.Image(images[0][i]),
+                    wandb.Image(images[1][i]),
+                    wandb.Image(images[2][i])
+                )                      
 
-                self.logger.experiment.log({
-                    "Variation": [
-                        image, 
-                        recon,
-                        y_im,
-                        d_im,
-                        x_im
-                    ]
-                })
+            self.logger.experiment.log({'COVID Variance': table})
+
                 
-
-
     def configure_optimizers(self) -> Any:
         optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
         return optimizer
     
-    def kl_div(self, qz, z_q):
-        z_p_loc, z_p_scale = torch.zeros(z_q.size()[0], self.latent_dim).cuda(), torch.ones(z_q.size()[0], self.latent_dim).cuda()
-        pz = torch.distributions.Normal(z_p_loc, z_p_scale)
-        # Todo the prior thingo
+    def kl_div(self, qz, z_q, label, type=None):
+        if type == 'y':
+            mu, log_var = self.prior_y(label)
+            pz = self.reparametrize(mu, log_var)
+            
+        elif type == 'd':
+            mu, log_var = self.prior_d(label)
+            pz = self.reparametrize(mu, log_var)
+        else:
+            z_p_loc, z_p_scale = torch.zeros(z_q.size()[0], self.zx_dim).cuda(), torch.ones(z_q.size()[0], self.zx_dim).cuda()
+            pz = torch.distributions.Normal(z_p_loc, z_p_scale)
         kl_div = torch.sum(pz.log_prob(z_q) - qz.log_prob(z_q))
 
         return kl_div
@@ -204,9 +222,41 @@ class DIVA(pl.LightningModule):
         return class_loss, class_acc
     
     def reparametrize(self, mu, log_var):
+        if torch.isnan(mu).any():
+            print("mu is nan")
+            print(mu)
+        elif torch.isnan(log_var).any():
+            print("log_var is nan")
+            print(log_var)
         std = torch.exp(0.5 * log_var)
         qz = torch.distributions.Normal(mu, std)
         return qz
+    
+    
+class Prior(nn.Module):
+    def __init__(self, classes, latent_dim):
+        super().__init__()
+        self.fc1 = nn.Sequential(nn.Linear(classes, latent_dim, bias=False), nn.BatchNorm1d(latent_dim), nn.ReLU())
+        self.fc21 = nn.Sequential(nn.Linear(latent_dim, latent_dim))
+        self.fc22 = nn.Sequential(nn.Linear(latent_dim, latent_dim))
+
+        self.classes = classes
+
+        torch.nn.init.xavier_uniform_(self.fc1[0].weight)
+        self.fc1[1].weight.data.fill_(1)
+        self.fc1[1].bias.data.zero_()
+        torch.nn.init.xavier_uniform_(self.fc21[0].weight)
+        self.fc21[0].bias.data.zero_()
+        torch.nn.init.xavier_uniform_(self.fc22[0].weight)
+        self.fc22[0].bias.data.zero_()
+
+    def forward(self, c):
+        x = F.one_hot(c, num_classes=self.classes).float()
+        hidden = self.fc1(x)
+        mu = self.fc21(hidden)
+        log_var = self.fc22(hidden)
+
+        return mu, log_var
 
 
 # A classifier that takes a latent vector and reduces it to a single class
@@ -257,20 +307,20 @@ class Encoder(nn.Module):
         # n x 64 x 16 x 16
         self.c4 = ConvBlock(64, 64, 3, 1, 1)
         # n x 64 x 8 x 8
-        # self.c5 = ConvBlock(64, 64, 3, 1, 1)
+        self.c5 = ConvBlock(64, 64, 3, 1, 1)
         # n x 64 x 4 x 4
         
-        self.mu = nn.Linear(4096, latent_dim)
-        self.log_var = nn.Linear(4096, latent_dim)
+        self.mu = nn.Linear(1024, latent_dim)
+        self.log_var = nn.Linear(1024, latent_dim)
         
     def forward(self, x):
         z = self.c1(x)
         z = self.c2(z)
         z = self.c3(z)
         z = self.c4(z)
-        # z = self.c5(z)
+        z = self.c5(z)
 
-        z = z.view(-1, 4096)
+        z = z.view(-1, 1024)
         mu = self.mu(z)
         log_var = self.log_var(z)
         return mu , log_var
@@ -282,17 +332,17 @@ class Decoder(nn.Module):
         super().__init__()
         self.fc = nn.Linear(latent_dim, 4096)
         self.d1 = DeConvBlock(64, 64, 3, 1, 1)
-        self.d2 = DeConvBlock(64, 32, 3, 1, 1)
-        self.d3 = DeConvBlock(32, 16, 3, 1, 1)
-        self.d4 = DeConvBlock(16, 1, 3, 1, 1)
-        # self.d5 = DeConvBlock(16, 1, 3, 1, 1)
+        self.d2 = DeConvBlock(64, 64, 3, 1, 1)
+        self.d3 = DeConvBlock(64, 32, 3, 1, 1)
+        self.d4 = DeConvBlock(32, 16, 3, 1, 1)
+        self.d5 = DeConvBlock(16, 1, 3, 1, 1)
         
     def forward(self, z):
         z = self.fc(z)
-        z = z.view(-1, 64, 8, 8)
+        z = z.view(-1, 64, 4, 4)
         z = self.d1(z)
         z = self.d2(z)
         z = self.d3(z)
         z = self.d4(z)
-        # z = self.d5(z)
+        z = self.d5(z)
         return z
